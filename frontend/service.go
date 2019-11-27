@@ -2,24 +2,20 @@ package frontend
 
 import (
 	"context"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/golang/protobuf/proto"
 
 	// blank import for sqlite driver support
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/sirupsen/logrus"
 	"github.com/zcash-hackworks/lightwalletd/common"
-	"github.com/zcash-hackworks/lightwalletd/storage"
 	"github.com/zcash-hackworks/lightwalletd/walletrpc"
 )
 
@@ -29,39 +25,79 @@ var (
 
 // the service type
 type SqlStreamer struct {
-	db     *sql.DB
+	cache  *common.BlockCache
 	client *rpcclient.Client
 	log    *logrus.Entry
 }
 
-func NewSQLiteStreamer(dbPath string, client *rpcclient.Client, log *logrus.Entry) (walletrpc.CompactTxStreamerServer, error) {
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_busy_timeout=10000&cache=shared", dbPath))
-	db.SetMaxOpenConns(1)
-	if err != nil {
-		return nil, err
-	}
-
-	// Creates our tables if they don't already exist.
-	err = storage.CreateTables(db)
-	if err != nil {
-		return nil, err
-	}
-
-	return &SqlStreamer{db, client, log}, nil
+func NewSQLiteStreamer(client *rpcclient.Client, cache *common.BlockCache, log *logrus.Entry) (walletrpc.CompactTxStreamerServer, error) {
+	return &SqlStreamer{cache, client, log}, nil
 }
 
 func (s *SqlStreamer) GracefulStop() error {
-	return s.db.Close()
+	return nil
+}
+
+func (s *SqlStreamer) GetCache() *common.BlockCache {
+	return s.cache
 }
 
 func (s *SqlStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc.ChainSpec) (*walletrpc.BlockID, error) {
-	// the ChainSpec type is an empty placeholder
-	height, err := storage.GetCurrentHeight(ctx, s.db)
-	if err != nil {
-		return nil, err
+	latestBlock := s.cache.GetLatestBlock()
+
+	if latestBlock == -1 {
+		return nil, errors.New("Cache is empty. Server is probably not yet ready.")
 	}
+
 	// TODO: also return block hashes here
-	return &walletrpc.BlockID{Height: uint64(height)}, nil
+	return &walletrpc.BlockID{Height: uint64(latestBlock)}, nil
+}
+
+func (s *SqlStreamer) GetAddressTxids(addressBlockFilter *walletrpc.TransparentAddressBlockFilter, resp walletrpc.CompactTxStreamer_GetAddressTxidsServer) error {
+	params := make([]json.RawMessage, 1)
+	st := "{\"addresses\": [\"" + addressBlockFilter.Address + "\"]," +
+		"\"start\": " + strconv.FormatUint(addressBlockFilter.Range.Start.Height, 10) +
+		", \"end\": " + strconv.FormatUint(addressBlockFilter.Range.End.Height, 10) + "}"
+
+	params[0] = json.RawMessage(st)
+
+	result, rpcErr := s.client.RawRequest("getaddresstxids", params)
+
+	var err error
+
+	// For some reason, the error responses are not JSON
+	if rpcErr != nil {
+		s.log.Errorf("Got error: %s", rpcErr.Error())
+		errParts := strings.SplitN(rpcErr.Error(), ":", 2)
+		_, err = strconv.ParseInt(errParts[0], 10, 32)
+		return nil
+	}
+
+	var txids []string
+	err = json.Unmarshal(result, &txids)
+	if err != nil {
+		s.log.Errorf("Got error: %s", err.Error())
+		return nil
+	}
+
+	timeout, cancel := context.WithTimeout(resp.Context(), 30*time.Second)
+	defer cancel()
+
+	for _, txidstr := range txids {
+		txid, _ := hex.DecodeString(txidstr)
+		// Txid is read as a string, which is in big-endian order. But when converting
+		// to bytes, it should be little-endian
+		for left, right := 0, len(txid)-1; left < right; left, right = left+1, right-1 {
+			txid[left], txid[right] = txid[right], txid[left]
+		}
+		tx, err := s.GetTransaction(timeout, &walletrpc.TxFilter{Hash: txid})
+		if err != nil {
+			s.log.Errorf("Got error: %s", err.Error())
+			return nil
+		}
+		resp.Send(tx)
+	}
+	return nil
 }
 
 func (s *SqlStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*walletrpc.CompactBlock, error) {
@@ -69,53 +105,33 @@ func (s *SqlStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*wal
 		return nil, ErrUnspecified
 	}
 
-	var blockBytes []byte
-	var err error
-
 	// Precedence: a hash is more specific than a height. If we have it, use it first.
 	if id.Hash != nil {
-		leHashString := hex.EncodeToString(id.Hash)
-		blockBytes, err = storage.GetBlockByHash(ctx, s.db, leHashString)
-	} else {
-		blockBytes, err = storage.GetBlock(ctx, s.db, int(id.Height))
+		// TODO: Get block by hash
+		return nil, errors.New("GetBlock by Hash is not yet implemented")
 	}
+	cBlock, err := common.GetBlock(s.client, s.cache, int(id.Height))
 
 	if err != nil {
 		return nil, err
 	}
 
-	cBlock := &walletrpc.CompactBlock{}
-	err = proto.Unmarshal(blockBytes, cBlock)
 	return cBlock, err
 }
 
 func (s *SqlStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.CompactTxStreamer_GetBlockRangeServer) error {
-	blockChan := make(chan []byte)
+	blockChan := make(chan walletrpc.CompactBlock)
 	errChan := make(chan error)
 
-	// TODO configure or stress-test this timeout
-	timeout, cancel := context.WithTimeout(resp.Context(), 30*time.Second)
-	defer cancel()
-	go storage.GetBlockRange(timeout,
-		s.db,
-		blockChan,
-		errChan,
-		int(span.Start.Height),
-		int(span.End.Height),
-	)
+	go common.GetBlockRange(s.client, s.cache, blockChan, errChan, int(span.Start.Height), int(span.End.Height))
 
 	for {
 		select {
 		case err := <-errChan:
 			// this will also catch context.DeadlineExceeded from the timeout
 			return err
-		case blockBytes := <-blockChan:
-			cBlock := &walletrpc.CompactBlock{}
-			err := proto.Unmarshal(blockBytes, cBlock)
-			if err != nil {
-				return err // TODO really need better logging in this whole service
-			}
-			err = resp.Send(cBlock)
+		case cBlock := <-blockChan:
+			err := resp.Send(&cBlock)
 			if err != nil {
 				return err
 			}
@@ -127,33 +143,67 @@ func (s *SqlStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.C
 
 func (s *SqlStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilter) (*walletrpc.RawTransaction, error) {
 	var txBytes []byte
-	var err error
+	var txHeight float64
 
 	if txf.Hash != nil {
-		leHashString := hex.EncodeToString(txf.Hash)
-		txBytes, err = storage.GetTxByHash(ctx, s.db, leHashString)
+		txid := txf.Hash
+		for left, right := 0, len(txid)-1; left < right; left, right = left+1, right-1 {
+			txid[left], txid[right] = txid[right], txid[left]
+		}
+		leHashString := hex.EncodeToString(txid)
+
+		// First call to get the raw transaction bytes
+		params := make([]json.RawMessage, 1)
+		params[0] = json.RawMessage("\"" + leHashString + "\"")
+
+		result, rpcErr := s.client.RawRequest("getrawtransaction", params)
+
+		var err error
+		// For some reason, the error responses are not JSON
+		if rpcErr != nil {
+			s.log.Errorf("Got error: %s", rpcErr.Error())
+			errParts := strings.SplitN(rpcErr.Error(), ":", 2)
+			_, err = strconv.ParseInt(errParts[0], 10, 32)
+			return nil, err
+		}
+		var txhex string
+		err = json.Unmarshal(result, &txhex)
 		if err != nil {
 			return nil, err
 		}
-		return &walletrpc.RawTransaction{Data: txBytes}, nil
 
+		txBytes, err = hex.DecodeString(txhex)
+		if err != nil {
+			return nil, err
+		}
+		// Second call to get height
+		params = make([]json.RawMessage, 2)
+		params[0] = json.RawMessage("\"" + leHashString + "\"")
+		params[1] = json.RawMessage("1")
+
+		result, rpcErr = s.client.RawRequest("getrawtransaction", params)
+
+		// For some reason, the error responses are not JSON
+		if rpcErr != nil {
+			s.log.Errorf("Got error: %s", rpcErr.Error())
+			errParts := strings.SplitN(rpcErr.Error(), ":", 2)
+			_, err = strconv.ParseInt(errParts[0], 10, 32)
+			return nil, err
+		}
+		var txinfo interface{}
+		err = json.Unmarshal(result, &txinfo)
+		if err != nil {
+			return nil, err
+		}
+		txHeight = txinfo.(map[string]interface{})["height"].(float64)
+		return &walletrpc.RawTransaction{Data: txBytes, Height: uint64(txHeight)}, nil
 	}
 
 	if txf.Block.Hash != nil {
-		leHashString := hex.EncodeToString(txf.Hash)
-		txBytes, err = storage.GetTxByHashAndIndex(ctx, s.db, leHashString, int(txf.Index))
-		if err != nil {
-			return nil, err
-		}
-		return &walletrpc.RawTransaction{Data: txBytes}, nil
+		s.log.Error("Can't GetTransaction with a blockhash+num. Please call GetTransaction with txid")
+		return nil, errors.New("Can't GetTransaction with a blockhash+num. Please call GetTransaction with txid")
 	}
-
-	// A totally unset protobuf will attempt to fetch the genesis coinbase tx.
-	txBytes, err = storage.GetTxByHeightAndIndex(ctx, s.db, int(txf.Block.Height), int(txf.Index))
-	if err != nil {
-		return nil, err
-	}
-	return &walletrpc.RawTransaction{Data: txBytes}, nil
+	return &walletrpc.RawTransaction{Data: txBytes, Height: uint64(txHeight)}, nil
 }
 
 // GetLightdInfo gets the LightWalletD (this server) info

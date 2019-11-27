@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/zcash-hackworks/lightwalletd/common"
 	"github.com/zcash-hackworks/lightwalletd/frontend"
 	"github.com/zcash-hackworks/lightwalletd/walletrpc"
 )
@@ -83,13 +84,14 @@ func loggerFromContext(ctx context.Context) *logrus.Entry {
 
 type Options struct {
 	bindAddr      string `json:"bind_address,omitempty"`
-	dbPath        string `json:"db_path"`
 	tlsCertPath   string `json:"tls_cert_path,omitempty"`
 	tlsKeyPath    string `json:"tls_cert_key,omitempty"`
+	noTLS         bool   `json:no_tls,omitempty`
 	logLevel      uint64 `json:"log_level,omitempty"`
 	logPath       string `json:"log_file,omitempty"`
 	zcashConfPath string `json:"zcash_conf,omitempty"`
 	veryInsecure  bool   `json:"very_insecure,omitempty"`
+	cacheSize     int    `json:"cache_size,omitempty"`
 	wantVersion   bool
 }
 
@@ -104,25 +106,26 @@ func fileExists(filename string) bool {
 func main() {
 	opts := &Options{}
 	flag.StringVar(&opts.bindAddr, "bind-addr", "127.0.0.1:9067", "the address to listen on")
-	flag.StringVar(&opts.dbPath, "db-path", "./database.sqlite", "the path to a sqlite database file")
 	flag.StringVar(&opts.tlsCertPath, "tls-cert", "./cert.pem", "the path to a TLS certificate")
 	flag.StringVar(&opts.tlsKeyPath, "tls-key", "./cert.key", "the path to a TLS key file")
 	flag.Uint64Var(&opts.logLevel, "log-level", uint64(logrus.InfoLevel), "log level (logrus 1-7)")
 	flag.StringVar(&opts.logPath, "log-file", "./server.log", "log file to write to")
 	flag.StringVar(&opts.zcashConfPath, "conf-file", "./zcash.conf", "conf file to pull RPC creds from")
 	flag.BoolVar(&opts.veryInsecure, "very-insecure", false, "run without the required TLS certificate, only for debugging, DO NOT use in production")
+	flag.BoolVar(&opts.noTLS, "no-tls", false, "Disable TLS, serve un-encrypted traffic.") // XXX redundant with -veryInsecure, remove
 	flag.BoolVar(&opts.wantVersion, "version", false, "version (major.minor.patch)")
+	flag.IntVar(&opts.cacheSize, "cache-size", 40000, "number of blocks to hold in the cache")
+
 	// TODO prod metrics
 	// TODO support config from file and env vars
 	flag.Parse()
 
 	if opts.wantVersion {
-		fmt.Println("lightwalletd ingest version v0.1.0")
+		fmt.Println("lightwalletd version v0.2.0")
 		return
 	}
 
 	filesThatShouldExist := []string{
-		opts.dbPath,
 		opts.tlsCertPath,
 		opts.tlsKeyPath,
 		opts.logPath,
@@ -133,7 +136,7 @@ func main() {
 		if !fileExists(opts.logPath) {
 			os.OpenFile(opts.logPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
 		}
-		if opts.veryInsecure && (filename == opts.tlsCertPath || filename == opts.tlsKeyPath) {
+		if (opts.veryInsecure || opts.noTLS) && (filename == opts.tlsCertPath || filename == opts.tlsKeyPath) {
 			continue
 		}
 		if !fileExists(filename) {
@@ -162,7 +165,7 @@ func main() {
 	// gRPC initialization
 	var server *grpc.Server
 
-	if opts.veryInsecure {
+	if opts.veryInsecure || opts.noTLS {
 		server = grpc.NewServer(LoggingInterceptor())
 	} else {
 		transportCreds, err := credentials.NewServerTLSFromFile(opts.tlsCertPath, opts.tlsKeyPath)
@@ -192,12 +195,34 @@ func main() {
 		}).Fatal("setting up RPC connection to zcashd")
 	}
 
-	// Compact transaction service initialization
-	service, err := frontend.NewSQLiteStreamer(opts.dbPath, rpcClient, log)
+	// Get the sapling activation height from the RPC
+	saplingHeight, blockHeight, chainName, branchID, err := common.GetSaplingInfo(rpcClient)
 	if err != nil {
 		log.WithFields(logrus.Fields{
-			"db_path": opts.dbPath,
-			"error":   err,
+			"error": err,
+		}).Warn("Unable to get sapling activation height")
+	}
+
+	log.Info("Got sapling height ", saplingHeight, " chain ", chainName, " branchID ", branchID)
+
+	// Initialize the cache
+	cache := common.NewBlockCache(opts.cacheSize)
+
+	stopChan := make(chan bool, 1)
+
+	// Start the block cache importer at latestblock - 100k(cache size)
+	cacheStart := blockHeight - opts.cacheSize
+	if cacheStart < saplingHeight {
+		cacheStart = saplingHeight
+	}
+
+	go common.BlockIngestor(rpcClient, cache, log, stopChan, cacheStart)
+
+	// Compact transaction service initialization
+	service, err := frontend.NewSQLiteStreamer(rpcClient, cache, log)
+	if err != nil {
+		log.WithFields(logrus.Fields{
+			"error": err,
 		}).Fatal("couldn't create SQL backend")
 	}
 	defer service.(*frontend.SqlStreamer).GracefulStop()
@@ -222,7 +247,10 @@ func main() {
 		log.WithFields(logrus.Fields{
 			"signal": s.String(),
 		}).Info("caught signal, stopping gRPC server")
+		// Stop the server
 		server.GracefulStop()
+		// Stop the block ingestor
+		stopChan <- true
 	}()
 
 	log.Infof("Starting gRPC server on %s", opts.bindAddr)
