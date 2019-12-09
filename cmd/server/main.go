@@ -219,13 +219,12 @@ func main() {
 	go common.BlockIngestor(rpcClient, cache, log, stopChan, cacheStart)
 
 	// Compact transaction service initialization
-	service, err := frontend.NewSQLiteStreamer(rpcClient, cache, log)
+	service, err := frontend.NewLwdStreamer(rpcClient, cache, log)
 	if err != nil {
 		log.WithFields(logrus.Fields{
 			"error": err,
-		}).Fatal("couldn't create SQL backend")
+		}).Fatal("couldn't create backend")
 	}
-	defer service.(*frontend.SqlStreamer).GracefulStop()
 
 	// Register service
 	walletrpc.RegisterCompactTxStreamerServer(server, service)
@@ -247,8 +246,6 @@ func main() {
 		log.WithFields(logrus.Fields{
 			"signal": s.String(),
 		}).Info("caught signal, stopping gRPC server")
-		// Stop the server
-		server.GracefulStop()
 		// Stop the block ingestor
 		stopChan <- true
 	}()

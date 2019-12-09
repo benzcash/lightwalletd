@@ -21,25 +21,21 @@ var (
 )
 
 // the service type
-type SqlStreamer struct {
+type LwdStreamer struct {
 	cache  *common.BlockCache
 	client *rpcclient.Client
 	log    *logrus.Entry
 }
 
-func NewSQLiteStreamer(client *rpcclient.Client, cache *common.BlockCache, log *logrus.Entry) (walletrpc.CompactTxStreamerServer, error) {
-	return &SqlStreamer{cache, client, log}, nil
+func NewLwdStreamer(client *rpcclient.Client, cache *common.BlockCache, log *logrus.Entry) (walletrpc.CompactTxStreamerServer, error) {
+	return &LwdStreamer{cache, client, log}, nil
 }
 
-func (s *SqlStreamer) GracefulStop() error {
-	return nil
-}
-
-func (s *SqlStreamer) GetCache() *common.BlockCache {
+func (s *LwdStreamer) GetCache() *common.BlockCache {
 	return s.cache
 }
 
-func (s *SqlStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc.ChainSpec) (*walletrpc.BlockID, error) {
+func (s *LwdStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc.ChainSpec) (*walletrpc.BlockID, error) {
 	latestBlock := s.cache.GetLatestBlock()
 
 	if latestBlock == -1 {
@@ -50,7 +46,7 @@ func (s *SqlStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc
 	return &walletrpc.BlockID{Height: uint64(latestBlock)}, nil
 }
 
-func (s *SqlStreamer) GetAddressTxids(addressBlockFilter *walletrpc.TransparentAddressBlockFilter, resp walletrpc.CompactTxStreamer_GetAddressTxidsServer) error {
+func (s *LwdStreamer) GetAddressTxids(addressBlockFilter *walletrpc.TransparentAddressBlockFilter, resp walletrpc.CompactTxStreamer_GetAddressTxidsServer) error {
 	params := make([]json.RawMessage, 1)
 	st := "{\"addresses\": [\"" + addressBlockFilter.Address + "\"]," +
 		"\"start\": " + strconv.FormatUint(addressBlockFilter.Range.Start.Height, 10) +
@@ -97,7 +93,7 @@ func (s *SqlStreamer) GetAddressTxids(addressBlockFilter *walletrpc.TransparentA
 	return nil
 }
 
-func (s *SqlStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*walletrpc.CompactBlock, error) {
+func (s *LwdStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*walletrpc.CompactBlock, error) {
 	if id.Height == 0 && id.Hash == nil {
 		return nil, ErrUnspecified
 	}
@@ -116,7 +112,7 @@ func (s *SqlStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*wal
 	return cBlock, err
 }
 
-func (s *SqlStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.CompactTxStreamer_GetBlockRangeServer) error {
+func (s *LwdStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.CompactTxStreamer_GetBlockRangeServer) error {
 	blockChan := make(chan walletrpc.CompactBlock)
 	errChan := make(chan error)
 
@@ -138,7 +134,7 @@ func (s *SqlStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.C
 	return nil
 }
 
-func (s *SqlStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilter) (*walletrpc.RawTransaction, error) {
+func (s *LwdStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilter) (*walletrpc.RawTransaction, error) {
 	var txBytes []byte
 	var txHeight float64
 
@@ -204,7 +200,7 @@ func (s *SqlStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilte
 }
 
 // GetLightdInfo gets the LightWalletD (this server) info
-func (s *SqlStreamer) GetLightdInfo(ctx context.Context, in *walletrpc.Empty) (*walletrpc.LightdInfo, error) {
+func (s *LwdStreamer) GetLightdInfo(ctx context.Context, in *walletrpc.Empty) (*walletrpc.LightdInfo, error) {
 	saplingHeight, blockHeight, chainName, consensusBranchId, err := common.GetSaplingInfo(s.client)
 
 	if err != nil {
@@ -228,7 +224,7 @@ func (s *SqlStreamer) GetLightdInfo(ctx context.Context, in *walletrpc.Empty) (*
 }
 
 // SendTransaction forwards raw transaction bytes to a zcashd instance over JSON-RPC
-func (s *SqlStreamer) SendTransaction(ctx context.Context, rawtx *walletrpc.RawTransaction) (*walletrpc.SendResponse, error) {
+func (s *LwdStreamer) SendTransaction(ctx context.Context, rawtx *walletrpc.RawTransaction) (*walletrpc.SendResponse, error) {
 	// sendrawtransaction "hexstring" ( allowhighfees )
 	//
 	// Submits raw transaction (serialized, hex-encoded) to local node and network.
