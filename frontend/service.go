@@ -11,9 +11,6 @@ import (
 
 	"github.com/btcsuite/btcd/rpcclient"
 
-	// blank import for sqlite driver support
-	_ "github.com/mattn/go-sqlite3"
-
 	"github.com/sirupsen/logrus"
 	"github.com/zcash-hackworks/lightwalletd/common"
 	"github.com/zcash-hackworks/lightwalletd/walletrpc"
