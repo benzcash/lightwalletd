@@ -208,7 +208,7 @@ func main() {
 
 	stopChan := make(chan bool, 1)
 
-	// Start the block cache importer at latestblock - 100k(cache size)
+	// Start the block cache importer at cacheSize blocks before current height
 	cacheStart := blockHeight - opts.cacheSize
 	if cacheStart < saplingHeight {
 		cacheStart = saplingHeight
