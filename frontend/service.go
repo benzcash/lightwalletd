@@ -192,11 +192,12 @@ func (s *LwdStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilte
 		return &walletrpc.RawTransaction{Data: txBytes, Height: uint64(txHeight)}, nil
 	}
 
-	if txf.Block.Hash != nil {
+	if txf.Block != nil && txf.Block.Hash != nil {
 		s.log.Error("Can't GetTransaction with a blockhash+num. Please call GetTransaction with txid")
 		return nil, errors.New("Can't GetTransaction with a blockhash+num. Please call GetTransaction with txid")
 	}
-	return &walletrpc.RawTransaction{Data: txBytes, Height: uint64(txHeight)}, nil
+	s.log.Error("Please call GetTransaction with txid")
+	return nil, errors.New("Please call GetTransaction with txid")
 }
 
 // GetLightdInfo gets the LightWalletD (this server) info
