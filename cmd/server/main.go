@@ -86,7 +86,6 @@ type Options struct {
 	bindAddr      string `json:"bind_address,omitempty"`
 	tlsCertPath   string `json:"tls_cert_path,omitempty"`
 	tlsKeyPath    string `json:"tls_cert_key,omitempty"`
-	noTLS         bool   `json:no_tls,omitempty`
 	logLevel      uint64 `json:"log_level,omitempty"`
 	logPath       string `json:"log_file,omitempty"`
 	zcashConfPath string `json:"zcash_conf,omitempty"`
@@ -111,8 +110,7 @@ func main() {
 	flag.Uint64Var(&opts.logLevel, "log-level", uint64(logrus.InfoLevel), "log level (logrus 1-7)")
 	flag.StringVar(&opts.logPath, "log-file", "./server.log", "log file to write to")
 	flag.StringVar(&opts.zcashConfPath, "conf-file", "./zcash.conf", "conf file to pull RPC creds from")
-	flag.BoolVar(&opts.veryInsecure, "very-insecure", false, "run without the required TLS certificate, only for debugging, DO NOT use in production")
-	flag.BoolVar(&opts.noTLS, "no-tls", false, "Disable TLS, serve un-encrypted traffic.") // XXX redundant with -veryInsecure, remove
+	flag.BoolVar(&opts.veryInsecure, "no-tls-very-insecure", false, "run without the required TLS certificate, only for debugging, DO NOT use in production")
 	flag.BoolVar(&opts.wantVersion, "version", false, "version (major.minor.patch)")
 	flag.IntVar(&opts.cacheSize, "cache-size", 40000, "number of blocks to hold in the cache")
 
@@ -136,7 +134,7 @@ func main() {
 		if !fileExists(opts.logPath) {
 			os.OpenFile(opts.logPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
 		}
-		if (opts.veryInsecure || opts.noTLS) && (filename == opts.tlsCertPath || filename == opts.tlsKeyPath) {
+		if opts.veryInsecure && (filename == opts.tlsCertPath || filename == opts.tlsKeyPath) {
 			continue
 		}
 		if !fileExists(filename) {
@@ -165,7 +163,7 @@ func main() {
 	// gRPC initialization
 	var server *grpc.Server
 
-	if opts.veryInsecure || opts.noTLS {
+	if opts.veryInsecure {
 		server = grpc.NewServer(LoggingInterceptor())
 	} else {
 		transportCreds, err := credentials.NewServerTLSFromFile(opts.tlsCertPath, opts.tlsKeyPath)
