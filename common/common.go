@@ -3,7 +3,6 @@ package common
 import (
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -15,28 +14,34 @@ import (
 	"github.com/zcash-hackworks/lightwalletd/walletrpc"
 )
 
-func GetSaplingInfo(rpcClient *rpcclient.Client) (int, int, string, string, error) {
-	result, rpcErr := rpcClient.RawRequest("getblockchaininfo", make([]json.RawMessage, 0))
-
-	var err error
-	var errCode int64
-
-	// For some reason, the error responses are not JSON
-	if rpcErr != nil {
-		errParts := strings.SplitN(rpcErr.Error(), ":", 2)
-		errCode, err = strconv.ParseInt(errParts[0], 10, 32)
-		if err == nil && errCode == -8 {
-			return -1, -1, "", "", nil
-		}
-		return -1, -1, "", "", errors.Wrap(rpcErr, "error requesting block")
-	}
-
+func GetSaplingInfo(rpcClient *rpcclient.Client, log *logrus.Entry) (int, int, string, string) {
+	// This request must succeed or we can't go on; give zcashd time to start up
 	var f interface{}
-	err = json.Unmarshal(result, &f)
-	if err != nil {
-		return -1, -1, "", "", errors.Wrap(err, "error reading JSON response")
+	retryCount := 0
+	for {
+		result, rpcErr := rpcClient.RawRequest("getblockchaininfo", make([]json.RawMessage, 0))
+		if rpcErr == nil {
+			if retryCount > 0 {
+				log.Warn("getblockchaininfo RPC successful")
+			}
+			err := json.Unmarshal(result, &f)
+			if err != nil {
+				log.Fatalf("error parsing JSON getblockchaininfo response: %v", err)
+			}
+			break
+		}
+		retryCount++
+		if retryCount > 10 {
+			log.WithFields(logrus.Fields{
+				"timeouts": retryCount,
+			}).Fatal("unable to issue getblockchaininfo RPC call to zcashd node")
+		}
+		log.WithFields(logrus.Fields{
+			"error": rpcErr.Error(),
+			"retry": retryCount,
+		}).Warn("error with getblockchaininfo rpc, retrying...")
+		time.Sleep(time.Duration(10+retryCount*5) * time.Second) // backoff
 	}
-
 	chainName := f.(map[string]interface{})["chain"].(string)
 
 	upgradeJSON := f.(map[string]interface{})["upgrades"]
@@ -48,7 +53,7 @@ func GetSaplingInfo(rpcClient *rpcclient.Client) (int, int, string, string, erro
 	consensus := f.(map[string]interface{})["consensus"]
 	branchID := consensus.(map[string]interface{})["nextblock"].(string)
 
-	return int(saplingHeight), int(blockHeight), chainName, branchID, nil
+	return int(saplingHeight), int(blockHeight), chainName, branchID
 }
 
 func getBlockFromRPC(rpcClient *rpcclient.Client, height int) (*walletrpc.CompactBlock, error) {
@@ -57,13 +62,10 @@ func getBlockFromRPC(rpcClient *rpcclient.Client, height int) (*walletrpc.Compac
 	params[1] = json.RawMessage("0")
 	result, rpcErr := rpcClient.RawRequest("getblock", params)
 
-	var err error
-	var errCode int64
-
 	// For some reason, the error responses are not JSON
 	if rpcErr != nil {
 		errParts := strings.SplitN(rpcErr.Error(), ":", 2)
-		errCode, err = strconv.ParseInt(errParts[0], 10, 32)
+		errCode, err := strconv.ParseInt(errParts[0], 10, 32)
 		// Check to see if we are requesting a height the zcashd doesn't have yet
 		if err == nil && errCode == -8 {
 			return nil, nil
@@ -72,7 +74,7 @@ func getBlockFromRPC(rpcClient *rpcclient.Client, height int) (*walletrpc.Compac
 	}
 
 	var blockDataHex string
-	err = json.Unmarshal(result, &blockDataHex)
+	err := json.Unmarshal(result, &blockDataHex)
 	if err != nil {
 		return nil, errors.Wrap(err, "error reading JSON response")
 	}
@@ -94,77 +96,61 @@ func getBlockFromRPC(rpcClient *rpcclient.Client, height int) (*walletrpc.Compac
 	return block.ToCompact(), nil
 }
 
-func BlockIngestor(rpcClient *rpcclient.Client, cache *BlockCache, log *logrus.Entry,
-	stopChan chan bool, startHeight int) {
+func BlockIngestor(rpcClient *rpcclient.Client, cache *BlockCache, log *logrus.Entry, startHeight int) {
 	reorgCount := 0
 	height := startHeight
-	timeoutCount := 0
 
 	// Start listening for new blocks
+	retryCount := 0
 	for {
-		select {
-		case <-stopChan:
-			break
-
-		case <-time.After(15 * time.Second):
-			for {
-				if reorgCount > 0 {
-					height -= 10
-				}
-
-				if reorgCount > 10 {
-					log.Error("Reorg exceeded max of 100 blocks! Help!")
-					return
-				}
-
-				block, err := getBlockFromRPC(rpcClient, height)
-
-				if err != nil {
+		block, err := getBlockFromRPC(rpcClient, height)
+		if block == nil || err != nil {
+			if err != nil {
+				log.WithFields(logrus.Fields{
+					"height": height,
+					"error":  err,
+				}).Warn("error with getblock rpc")
+				retryCount++
+				if retryCount > 10 {
 					log.WithFields(logrus.Fields{
-						"height": height,
-						"error":  err,
-					}).Warn("error with getblock")
-
-					timeoutCount++
-					if timeoutCount == 3 {
-						log.WithFields(logrus.Fields{
-							"timeouts": timeoutCount,
-						}).Warn("unable to issue RPC call to zcashd node 3 times")
-						break
-					}
-				}
-
-				if block == nil {
-					break
-				}
-				if timeoutCount > 0 {
-					timeoutCount--
-				}
-
-				log.Info("Ingestor adding block to cache: ", height)
-				err, reorg := cache.Add(height, block)
-
-				if err != nil {
-					log.Error("Error adding block to cache: ", err)
-					continue
-				}
-
-				// Check for reorgs once we have inital block hash from startup
-				if reorg {
-					reorgCount++
-
-					log.WithFields(logrus.Fields{
-						"height": height,
-						"hash":   displayHash(block.Hash),
-						"phash":  displayHash(block.PrevHash),
-						"reorg":  reorgCount,
-					}).Warn("REORG")
-				} else {
-					reorgCount = 0
-					height++
+						"timeouts": retryCount,
+					}).Fatal("unable to issue RPC call to zcashd node")
 				}
 			}
+			// We're up to date in our polling; wait for a new block
+			time.Sleep(10 * time.Second)
+			continue
 		}
+		retryCount = 0
+
+		log.Info("Ingestor adding block to cache: ", height)
+		err, reorg := cache.Add(height, block)
+
+		if err != nil {
+			// It's unclear how this will recover, but we certainly
+			// don't want to loop full-speed
+			log.Error("Error adding block to cache: ", err)
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		// Check for reorgs once we have inital block hash from startup
+		if reorg {
+			height -= 10
+			reorgCount++
+			if reorgCount > 10 {
+				log.Fatal("Reorg exceeded max of 100 blocks! Help!")
+			}
+			log.WithFields(logrus.Fields{
+				"height": height,
+				"hash":   displayHash(block.Hash),
+				"phash":  displayHash(block.PrevHash),
+				"reorg":  reorgCount,
+			}).Warn("REORG")
+			continue
+		}
+		reorgCount = 0
+		height++
 	}
 }
 
@@ -175,17 +161,14 @@ func GetBlock(rpcClient *rpcclient.Client, cache *BlockCache, height int) (*wall
 		return block, nil
 	}
 
-	// If a block was not found, make sure user is requesting a historical block
-	if height > cache.GetLatestBlock() {
-		return nil, errors.New(
-			fmt.Sprintf(
-				"Block requested is newer than latest block. Requested: %d Latest: %d",
-				height, cache.GetLatestBlock()))
-	}
-
+	// Not in the cache, ask zcashd
 	block, err := getBlockFromRPC(rpcClient, height)
 	if err != nil {
 		return nil, err
+	}
+	if block == nil {
+		// Block height is too large
+		return nil, errors.New("block requested is newer than latest block")
 	}
 	return block, nil
 }

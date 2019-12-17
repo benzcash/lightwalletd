@@ -75,7 +75,7 @@ docker_img_stop_zcashd:
 
 # Start the lightwalletd server in the zcashdlwd container
 docker_img_run_lightwalletd_insecure_server:
-	docker exec -i zcashdlwd server --very-insecure=true --conf-file /home/zcash/.zcash/zcash.conf --db-path /db/sql.db --log-file /logs/server.log --bind-addr 127.0.0.1:18232
+	docker exec -i zcashdlwd server --no-tls-very-insecure=true --conf-file /home/zcash/.zcash/zcash.conf --log-file /logs/server.log --bind-addr 127.0.0.1:18232
 
 # Remove and delete ALL images and containers in Docker; assumes containers are stopped
 docker_remove_all:

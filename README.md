@@ -27,7 +27,7 @@ This will build the server binary, where you can use the below commands to confi
 Assuming you used `make` to build SERVER:
 
 ```
-./server --very-insecure=true --conf-file /home/zcash/.zcash/zcash.conf --log-file /logs/server.log --bind-addr 127.0.0.1:18232
+./server --no-tls-very-insecure=true --conf-file /home/zcash/.zcash/zcash.conf --log-file /logs/server.log --bind-addr 127.0.0.1:18232
 ```
 
 # Production Usage

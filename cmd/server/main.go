@@ -194,19 +194,12 @@ func main() {
 	}
 
 	// Get the sapling activation height from the RPC
-	saplingHeight, blockHeight, chainName, branchID, err := common.GetSaplingInfo(rpcClient)
-	if err != nil {
-		log.WithFields(logrus.Fields{
-			"error": err,
-		}).Warn("Unable to get sapling activation height")
-	}
-
+	// (this first RPC also verifies that we can communicate with zcashd)
+	saplingHeight, blockHeight, chainName, branchID := common.GetSaplingInfo(rpcClient, log)
 	log.Info("Got sapling height ", saplingHeight, " chain ", chainName, " branchID ", branchID)
 
 	// Initialize the cache
 	cache := common.NewBlockCache(opts.cacheSize)
-
-	stopChan := make(chan bool, 1)
 
 	// Start the block cache importer at cacheSize blocks before current height
 	cacheStart := blockHeight - opts.cacheSize
@@ -214,7 +207,7 @@ func main() {
 		cacheStart = saplingHeight
 	}
 
-	go common.BlockIngestor(rpcClient, cache, log, stopChan, cacheStart)
+	go common.BlockIngestor(rpcClient, cache, log, cacheStart)
 
 	// Compact transaction service initialization
 	service, err := frontend.NewLwdStreamer(rpcClient, cache, log)
@@ -244,8 +237,7 @@ func main() {
 		log.WithFields(logrus.Fields{
 			"signal": s.String(),
 		}).Info("caught signal, stopping gRPC server")
-		// Stop the block ingestor
-		stopChan <- true
+		os.Exit(1)
 	}()
 
 	log.Infof("Starting gRPC server on %s", opts.bindAddr)

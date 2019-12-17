@@ -202,19 +202,12 @@ func (s *LwdStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilte
 
 // GetLightdInfo gets the LightWalletD (this server) info
 func (s *LwdStreamer) GetLightdInfo(ctx context.Context, in *walletrpc.Empty) (*walletrpc.LightdInfo, error) {
-	saplingHeight, blockHeight, chainName, consensusBranchId, err := common.GetSaplingInfo(s.client)
-
-	if err != nil {
-		s.log.WithFields(logrus.Fields{
-			"error": err,
-		}).Warn("Unable to get sapling activation height")
-		return nil, err
-	}
+	saplingHeight, blockHeight, chainName, consensusBranchId := common.GetSaplingInfo(s.client, s.log)
 
 	// TODO these are called Error but they aren't at the moment.
 	// A success will return code 0 and message txhash.
 	return &walletrpc.LightdInfo{
-		Version:                 "0.2.0",
+		Version:                 "0.2.1",
 		Vendor:                  "ECC LightWalletD",
 		TaddrSupport:            true,
 		ChainName:               chainName,
