@@ -219,6 +219,8 @@ func main() {
 
 	// Register service
 	walletrpc.RegisterCompactTxStreamerServer(server, service)
+	healthServer := frontend.NewHealthServer()
+	walletrpc.RegisterHealthServer(server, healthServer)
 
 	// Start listening
 	listener, err := net.Listen("tcp", opts.bindAddr)

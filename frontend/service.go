@@ -8,7 +8,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/btcsuite/btcd/rpcclient"
 
@@ -32,6 +36,39 @@ func NewLwdStreamer(client *rpcclient.Client, cache *common.BlockCache, log *log
 	return &LwdStreamer{cache, client, log}, nil
 }
 
+// Server is used to implement gorush grpc server.
+type HealthServer struct {
+	mu sync.Mutex
+	// statusMap stores the serving status of the services this Server monitors.
+	statusMap map[string]walletrpc.HealthCheckResponse_ServingStatus
+}
+
+// NewServer returns a new Server.
+func NewHealthServer() *HealthServer {
+	return &HealthServer{
+		statusMap: make(map[string]walletrpc.HealthCheckResponse_ServingStatus),
+	}
+}
+
+func (s *HealthServer) Check(ctx context.Context, in *walletrpc.HealthCheckRequest) (*walletrpc.HealthCheckResponse, error) {
+	if in.Service == "" {
+		return &walletrpc.HealthCheckResponse{
+			Status: walletrpc.HealthCheckResponse_SERVING,
+		}, nil
+	}
+	if status, ok := s.statusMap[in.Service]; ok {
+		return &walletrpc.HealthCheckResponse{
+			Status: status,
+		}, nil
+	}
+	// TODO, support checking of specific services
+	return nil, status.Error(codes.NotFound, "unknown service")
+}
+
+func (s *HealthServer) RegisterServer(serverToRegister string, status int) error {
+	return nil
+}
+
 func (s *LwdStreamer) GetCache() *common.BlockCache {
 	return s.cache
 }
@@ -42,7 +79,6 @@ func (s *LwdStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc
 	if latestBlock == -1 {
 		return nil, errors.New("Cache is empty. Server is probably not yet ready.")
 	}
-
 	// TODO: also return block hashes here
 	return &walletrpc.BlockID{Height: uint64(latestBlock)}, nil
 }
