@@ -36,21 +36,26 @@ func NewLwdStreamer(client *rpcclient.Client, cache *common.BlockCache, log *log
 	return &LwdStreamer{cache, client, log}, nil
 }
 
-// Server is used to implement gorush grpc server.
+// HealthServer is used to implement the grpc server.
 type HealthServer struct {
 	mu sync.Mutex
 	// statusMap stores the serving status of the services this Server monitors.
 	statusMap map[string]walletrpc.HealthCheckResponse_ServingStatus
 }
 
-// NewServer returns a new Server.
+// NewHealthServer returns a new HealthServer.
 func NewHealthServer() *HealthServer {
 	return &HealthServer{
 		statusMap: make(map[string]walletrpc.HealthCheckResponse_ServingStatus),
 	}
 }
 
+// Check returns the healthcheck status of the requested Service
+// If no Service name is provided, a global health response is returned
+// Reference https://github.com/grpc/grpc/blob/master/doc/health-checking.md
 func (s *HealthServer) Check(ctx context.Context, in *walletrpc.HealthCheckRequest) (*walletrpc.HealthCheckResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if in.Service == "" {
 		return &walletrpc.HealthCheckResponse{
 			Status: walletrpc.HealthCheckResponse_SERVING,
@@ -65,6 +70,9 @@ func (s *HealthServer) Check(ctx context.Context, in *walletrpc.HealthCheckReque
 	return nil, status.Error(codes.NotFound, "unknown service")
 }
 
+// RegisterServer should be called by Service to register it health state
+// TODO: Implement
+// TODO: Register a channel for realtime status update
 func (s *HealthServer) RegisterServer(serverToRegister string, status int) error {
 	return nil
 }
