@@ -235,13 +235,8 @@ func main() {
 		}).Fatal("couldn't create backend")
 	}
 
-	mux := http.NewServeMux()
-
 	// Register service
 	walletrpc.RegisterCompactTxStreamerServer(server, service)
-	ctx := context.Background()
-	gwmux := runtime.NewServeMux()
-	walletrpc.RegisterCompactTxStreamerHandlerFromEndpoint(ctx, gwmux, opts.bindAddr, []grpc.DialOption{})
 
 	// Start listening
 	listener, err := net.Listen("tcp", opts.bindAddr)
@@ -251,16 +246,35 @@ func main() {
 			"error":     err,
 		}).Fatal("couldn't create listener")
 	}
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	srv := &http.Server{
-		Addr:    opts.bindAddr,
-		Handler: grpcHandlerFunc(server, mux),
-		TLSConfig: &tls.Config{
-			NextProtos: []string{"h2"},
-		},
+	gwmux := runtime.NewServeMux()
+	gwopts := []grpc.DialOption{grpc.WithInsecure()}
+	err = walletrpc.RegisterCompactTxStreamerHandlerFromEndpoint(ctx, gwmux, opts.bindAddr, gwopts)
+	if err != nil {
+		log.WithFields(logrus.Fields{
+			"error": err,
+		}).Fatal("couldn't register gateway service")
+	}
+	// Create a TLS cert using the private key and certificate
+	serverTLSCert, err := tls.LoadX509KeyPair(opts.tlsCertPath, opts.tlsKeyPath)
+	if err != nil {
+		log.Fatalf("invalid key pair: %v", err)
 	}
 
-	err = srv.Serve(tls.NewListener(listener, srv.TLSConfig))
+	httpTLSConfig := &tls.Config{
+		NextProtos:   []string{"http/1.1", "h2"},
+		Certificates: []tls.Certificate{serverTLSCert},
+	}
+
+	httpSrv := &http.Server{
+		Addr:         ":8443",
+		Handler:      grpcHandlerFunc(server, gwmux),
+		TLSConfig:    httpTLSConfig,
+		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler), 0),
+	}
 
 	// Signal handler for graceful stops
 	signals := make(chan os.Signal, 1)
@@ -274,10 +288,16 @@ func main() {
 	}()
 
 	log.Infof("Starting gRPC server on %s", opts.bindAddr)
-	err = server.Serve(listener)
-	if err != nil {
-		log.WithFields(logrus.Fields{
-			"error": err,
-		}).Fatal("gRPC server exited")
-	}
+	go func() {
+		err = server.Serve(listener)
+		if err != nil {
+			log.WithFields(logrus.Fields{
+				"error": err,
+			}).Fatal("gRPC server exited")
+		}
+	}()
+
+	log.Infof("Starting grpc gateway server on %s", "8443")
+	httpSrv.ListenAndServeTLS("", "")
+
 }
